@@ -12,172 +12,192 @@ scene::scene(const char* filename)
 	std::cout << std::endl;
 }
 
-
-//reflects a vector v about a normal n
-glm::vec3 reflect(glm::vec3 v, glm::vec3 n)
+float clamp(float num, float min, float max)
 {
-	return glm::normalize(v - 2.0f * glm::dot(v, n) * n);
+	if (num < min)
+		return min;
+	if (num > max)
+		return max;
+
+	return num;
 }
 
-//refracts a vector d into an object
-bool refract(glm::vec3 dir, glm::vec3 normal, float n_t, glm::vec3 *t)
+//takes in normal, halway vector, and roughness alpha value
+float DistributionGGX(glm::vec3 N, glm::vec3 H, float a)
 {
-	//air
-	float n = 1.0f;// 003f;
-	
-	float sqrt_val = 1 - (glm::pow(n, 2) * (1 - glm::pow(glm::dot(dir, normal), 2))) / glm::pow(n_t, 2);
-	if (sqrt_val < 0)
-		return false;
+	a = a * a; //adding because apparently roughness should be squared according to disney and epic
+	float a2, NdotH, NdotH2, num, denom;
+	a2 = a * a;
+	NdotH = glm::dot(N, H);
+	NdotH2 = NdotH * NdotH;
 
-	*t = (n * (dir - normal * glm::dot(dir, normal))) / n_t - normal * glm::sqrt(sqrt_val);
-	return true;
+	num = a2;
+	denom = 3.14159 * glm::pow((NdotH2 * (a2 - 1) + 1), 2);
+	return num / denom;
+}
+
+//normal, view, and roughness alpha
+float GeometrySchlickGGX(glm::vec3 N, glm::vec3 v, float a)
+{
+	a = a * a; //adding because apparently roughness should be squared according to disney and epic
+	float k, NdotV;
+	k = glm::pow(a + 1, 2) / 8.0f; //remaps differently if we do IBL --- becomes (a^2)/2
+	NdotV = glm::max(glm::dot(N, v), 0.0f);
+
+	return NdotV / (NdotV * (1 - k) + k);
+}
+
+//normal, view, light (to/from surface) and alpha
+float GeometrySmith(glm::vec3 N, glm::vec3 v, glm::vec3 l, float a)
+{
+	a = a * a; //adding because apparently roughness should be squared according to disney and epic
+	return GeometrySchlickGGX(N, v, a) * GeometrySchlickGGX(N, l, a);
+}
+
+//incidence angle (from dot product of normal and halfway vector, index of refraction
+float FresnelSchlick(float VdotH, float ior)
+{
+	//float F0 = glm::pow((ior - 1) / (ior + 1), 2.0f);
+	float F0 = .04; //------------------------------------------------------------------------------------------------------------------try using this
+	return F0 + (1.0 - F0) * pow(clamp(1.0 - VdotH, 0.0f, 1.0f), 5.0);
+}
+
+float Attenuate(glm::vec3 lightPos, glm::vec3 surface)
+{
+	return 1.0f / glm::pow(glm::length(lightPos-surface), 2.0f);
+}
+
+float Radiance(glm::vec3 surface, glm::vec3 lightPos, glm::vec3 N)
+{
+	glm::vec3 wi = glm::normalize(lightPos - surface);
+	float cosTheta = glm::max(glm::dot(N, wi), 0.0f);
+	float attenuation = Attenuate(lightPos, surface);
+	return attenuation * cosTheta;
+}
+
+glm::vec3 pbrLighting()
+{
+	glm::vec3 result;
+	float kS, kD; //calculate specular and diffuse components
+	//kS = getSpecularPBR();
+	//kD = 1.0f - kS;
+
+	return result;
 }
 
 glm::vec3 scene::rayTrace(glm::vec3 eye, glm::vec3 dir, int recurseDepth)
 {
-	dir = glm::normalize(dir);
-	float epsilon = 0.001f;
-	int maxDepth = 3;
-	glm::vec3 intersectionLocation;
 	//start with black, add color as we go
 	glm::vec3 answer(0.0f);
 
 	//test for intersection against all our objects
 	float dist = myObjGroup->testIntersections(eye, dir);
 	//if we saw nothing, return the background color of our scene
-	if (dist >= 9999999)
+	if (dist == 9999999)
 		return bgColor;
-
-	intersectionLocation = eye + dist * dir;
 
 	//get the material index and normal vector(at the point we saw) of the object we saw
 	int matIndex = myObjGroup->getClosest()->getMatIndex();
-	material * texture = &myMaterials.at(matIndex);
-	glm::vec3 normal = myObjGroup->getClosest()->getNormal(eye, dir, dist); //add optional t parameter to speed this up
+	material* texture = &myMaterials.at(matIndex);
+	glm::vec3 normal = myObjGroup->getClosest()->getNormal(eye, dir);
 
 	//determine texture color
 	glm::vec3 textureColor;
 
 	if (!texture->image)
-	{
 		//this is multiplicative, rather than additive
 		//so if there is no texture, just use ones
 		textureColor = glm::vec3(1.0f);
-	}
 	else
 	{
 		//if there is a texture image, ask the object for the image coordinates (between 0 and 1)
 		glm::vec2 coords = myObjGroup->getClosest()->getTextureCoords(eye, dir);
 
 		//get the color from that image location
-		int x = (int)(texture->width*coords.x);
-		int y = (int)(texture->height*coords.y);
 
-		textureColor = texture->data[x + y*texture->width];
+		int x = (int)(texture->width * coords.x);
+		int y = (int)(texture->height * coords.y);
+		textureColor = texture->data[x + y * texture->width];
 	}
-
-
-
-	//////////////////////////////////////
-	// refractions
-	//////////////////////////////////////
-
-	//checking if the intersection was with an object whose material is a dielectric --- a material with a transparent color
-	if (myMaterials.at(matIndex).transparentCol != glm::vec3(0, 0, 0))
-	{
-		glm::vec3 k, r, t, ref, transparentCol;
-		float c, n_t, theta, phi, R_0, R;
-
-		r = reflect(dir, normal);
-		n_t = myMaterials.at(matIndex).refractionIndex;
-		theta = glm::asin(glm::length(glm::cross(-dir, normal)) / (glm::length(dir) + glm::length(normal)));
-		transparentCol = myMaterials.at(matIndex).transparentCol;
-
-		if (recurseDepth == maxDepth)
-			return transparentCol;
-
-		if (glm::dot(dir, normal) < 0) // into the material 
-		{
-			//printf("\poot\n");
-			refract(dir, normal, n_t, &t);
-			c = glm::dot(-dir, normal);
-			k.r = 1.0f;
-			k.g = 1.0f;
-			k.b = 1.0f;
-		}
-		else //when going out of material
-		{
-			//printf("toot\n");
-			k.r = glm::exp(-glm::log(transparentCol.r) * dist);
-			k.g = glm::exp(-glm::log(transparentCol.g) * dist);
-			k.b = glm::exp(-glm::log(transparentCol.b) * dist);
-
-			if (refract(dir, -normal, 1.0f / n_t, &t))
-				c = glm::dot(t, normal);
-			else
-			{
-				return k * rayTrace(intersectionLocation + epsilon * r, r, recurseDepth + 1);
-				//goto END_REFRACTION;
-			}
-		}
-
-		R_0 = glm::pow(n_t - 1, 2) / glm::pow(n_t + 1, 2);
-		R = R_0 + (1 - R_0) * glm::pow(1 - c, 5);
-		return  k * (R * rayTrace(intersectionLocation + epsilon * r, r, recurseDepth + 1) + (1 - R) * rayTrace(intersectionLocation + epsilon * t, t, recurseDepth + 1));
-	}
-
-//END_REFRACTION:
-	//////////////////////////////////////
-	// end refraction
-	//////////////////////////////////////
-
 
 	//add diffuse color times ambient light to our answer
-	if (dist < 9999999)
-		answer += myMaterials.at(matIndex).diffuseCol * ambLight; //XXX confused on what this means "diffuse color times ambient light" when they're both glm::vec3s? does it multiply by components?
+	//if (dist < 9999999)
+		answer += texture->diffuseCol * ambLight;
 
-	//iterate through all lights  
-	//if the light can see the surface point,
-	//add its diffuse color to a total diffuse for the point (using our illumination model)
-	//use testIntersection to help decide this
-	//add the diffuse light times the accumulated diffuse light to our answer
-	int i;
-	light l;
-	int t_shadow;
-	
-	for (i = 0; i < myLights.size(); i++)
+		bool doPBR = true;
+		answer = glm::vec3(0);
+	//iterate through all lights
+	for (int i = 0; i < myLights.size(); i++)
 	{
-		//using the Blinn-Phong shading model
-		glm::vec3 v, l, n, h, lightAtSurface;
-		v = -dir;
+		glm::vec3 k_s, k_d, I, n, l, h, surface;
+		k_d = texture->diffuseCol;
+		k_s = texture->specularCol;
+		I = myLights[i].color;
 		n = normal;
-		l = glm::normalize(myLights.at(i).position - (intersectionLocation));
-		h = glm::normalize((glm::normalize(v) + glm::normalize(l)));
-		lightAtSurface = myLights.at(i).color;
+		surface = eye + dist * dir;
+		l = glm::normalize(myLights[i].position - surface);
+		h = glm::normalize(l - dir);
 
-		//diffuse and specular colors
-		glm::vec3 k_d, k_s;
-		k_d = myMaterials.at(matIndex).diffuseCol;
-		k_s = myMaterials.at(matIndex).specularCol;
+		if (!doPBR)
+		{
+			//if the light can see the surface point,
+			//add its diffuse color to a total diffuse for the point (using our illumination model)
+			//use testIntersection to help decide this
+			float p = texture->shininess;
 
-		//the phong exponenet for specular highlight
-		float p = myMaterials.at(matIndex).shininess;
+			float t_shadow = myObjGroup->testIntersections(surface + l * .001f, l);
+			if (t_shadow == 9999999)
+				//answer += k_d * I * glm::max(0.0f, glm::dot(n, l)) + k_s * I * glm::pow(glm::max(0.0f, glm::dot(n, h)), p);
+				answer += k_d * I + k_s * I * glm::pow(glm::max(0.0f, glm::dot(n, h)), p);
 
-		//check if we're in shadow
-		t_shadow = myObjGroup->testIntersections(intersectionLocation + epsilon * l , l);
-		
-		//if the reflection off the surface would've only seen the background color, we're not in shadow
-		if (t_shadow >= 9999999 && dist >= epsilon)
-			answer += lightAtSurface * (k_d * glm::max(0.0f, glm::dot(n, l)) + k_s * glm::pow(glm::max(0.0f, glm::dot(n, h)), p));
+		}
+		else
+		{
+			float fader = 2000.0f;
+			glm::vec3 v = -dir;
+			float pi = 3.14159;
+			bool useTex = false;
+			glm::vec3 num;
+			float myAlph, alpha, D, G, f, denom;
+			myAlph = 0.5f;
+			alpha = useTex ? glm::length(texture->reflectiveCol) : myAlph;
+			
+			D = DistributionGGX(normal, h, alpha); //texture->reflectiveCol[0]
+			G = GeometrySmith(normal, v, l, alpha);
+			f = FresnelSchlick(glm::dot(v, n), texture->refractionIndex); //dir and normal from textbook, learnopengl also uses halfway in place of dir and I think that's wrong
+
+			glm::vec3 F(f);
+			num = D * G * F;
+			denom = 4.0f * glm::max(glm::dot(normal, v), 0.0f) * glm::max(glm::dot(normal, l), 0.0f) + .00001f; //adding teeny term at the end so we don't divide by zero
+			glm::vec3 spec = num / denom;
+
+			glm::vec3 kS, kD;
+			kS = F;
+			kD = glm::vec3(1.0f) - kS;
+
+			glm::vec3 radiance = fader * myLights[i].color * Attenuate(myLights[i].position, surface);
+			float NdotL = glm::max(glm::dot(normal, l), 0.0f);
+
+			glm::vec3 Lo = (kD * texture->diffuseCol / pi + spec) * radiance * NdotL;
+
+			answer = Lo;
+			//answer = kD * diff + spec;
+			//answer = D * G * texture->diffuseCol + F*texture->specularCol;
+			//answer = F * texture->diffuseCol + D * texture->diffuseCol + G * texture->diffuseCol;
+
+		}
+		//add the diffuse light times the accumulated diffuse light to our answer
 	}
-
+	//put a limit on the depth of recursion
+	if (recurseDepth<3)
+	{
 	//reflect our view across the normal
 	//recusively raytrace from the surface point along the reflected view
 	//add the color seen times the reflective color
-	glm::vec3 R = reflect(dir, normal);
+		glm::vec3 surface = eye + dist * dir;
+		glm::vec3 r = glm::normalize(dir - 2.0f * glm::dot(dir, normal) * normal);
+		answer += texture->reflectiveCol * rayTrace(surface + r * .001f, r, recurseDepth+1);
 
-	//checking the recusion depth and either making another call or returning the final color
-	answer =  recurseDepth == maxDepth ? answer : answer + myMaterials.at(matIndex).reflectiveCol * rayTrace(intersectionLocation + epsilon * R, R, recurseDepth + 1);
 
 	//if going into material (dot prod of dir and normal is negative), bend toward normal
 	//find entry angle using inverse cos of dot product of dir and -normal
@@ -187,10 +207,34 @@ glm::vec3 scene::rayTrace(glm::vec3 eye, glm::vec3 dir, int recurseDepth)
 	//divide entry angle by index of refraction to get exit angle
 	//recursively raytrace from the other side of the object along the new direction
 	//add the color seen times the transparent color
-	//}
+		
+		float theta, phi, n, n_t;
+		glm::vec3 t;
+
+		if (glm::dot(dir, normal) < 0)
+		{
+			theta = acos(glm::dot(dir, -normal));
+			phi = theta * texture->refractionIndex;
+			n = 1.0f;
+			n_t = texture->refractionIndex;
+
+			t = n * (dir + normal * cos(theta)) / n_t - normal * cos(phi);
+		}
+		else
+		{
+			theta = acos(glm::dot(dir, normal));
+			phi = theta / texture->refractionIndex;
+			n = texture->refractionIndex;
+			n_t = 1.0f;
+
+			t = n * (dir + normal * cos(theta)) / n_t - normal * cos(phi);
+		}
+
+		t = glm::normalize(t);
+		answer += rayTrace(surface + .001f * t, t, recurseDepth + 1) * texture->transparentCol;
+	}
 
 	//multiply whatever color we have found by the texture color
-	
 	answer *= textureColor;
 	return answer;
 }
@@ -245,6 +289,7 @@ void scene::parse(const char *filename)
 		//assert(file != NULL);
 	}
 	char token[MAX_PARSER_TOKEN_LENGTH];
+
 	//prime the parser pipe
 	parse_char = fgetc(file);
 
@@ -432,7 +477,7 @@ triangle* scene::parseTriangle()
 	std::printf("Triangle:\n");
 	std::printf("\tVertex0: %s tex xy 0 %s\n", glm::to_string(v0).c_str(), glm::to_string(glm::vec2(x0, y0)).c_str());
 	std::printf("\tVertex1: %s tex xy 1 %s\n", glm::to_string(v1).c_str(), glm::to_string(glm::vec2(x1, y1)).c_str());
-	std::printf("\tVertex2: %s tex xy 2 %s\n", glm::to_string(v2).c_str(), glm::to_string(glm::vec2(x2, y2)).c_str());
+	std::printf("\tVertex1: %s tex xy 1 %s\n", glm::to_string(v2).c_str(), glm::to_string(glm::vec2(x2, y2)).c_str());
 	std::printf("\tTriangle Material Index: %d\n\n", mat);
 
 	/**********************************************/
