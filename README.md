@@ -8,3 +8,4 @@ models to work with this engine.
 BioShock model ripped from game, converted with my obj loader, and rendered on my ray tracer.
 
 ![alt text](https://github.com/Nwc5237/RayTracer/blob/main/big_daddy_mirror_antialiased.png?raw=true)
+![alt text](https://github.com/Nwc5237/RayTracer/blob/main/pbrReflectionTest.png?raw=true)
